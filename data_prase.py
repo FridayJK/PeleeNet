@@ -4,6 +4,7 @@ import shutil
 import time 
 import math 
 import sys
+import random
 import shutil
 from glob import glob 
 
@@ -16,12 +17,23 @@ val_id(start from 1) -> ILSVRC_ID(start from 1) -> WIND
 """
 #---------------------------------------
 
-# image_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/val/"
+image_path = "./data/ILSVRC2012_val/"
 # devkit_dir = "/mnt/data/ILSVRC2012/ILSVRC2012_devkit_t12/"
 # synset = io.loadmat(os.path.join(devkit_dir, 'data', 'meta.mat'))
 # labels = np.loadtxt(os.path.join(devkit_dir, 'data', 'ILSVRC2012_validation_ground_truth.txt'),dtype="int")
-# # labels = np.loadtxt(devkit_dir + "ILSVRC2012_validation_ground_truth.txt",dtype="int")
-# images_list = glob(image_path + "*.JPEG")
+# labels = np.loadtxt(devkit_dir + "ILSVRC2012_validation_ground_truth.txt",dtype="int")
+images_list = glob(image_path + "*.JPEG", recursive=True)
+
+root_data_path = "./data/val/"
+os.makedirs(root_data_path, exist_ok=True)
+images_list = random.sample(images_list, 1000)
+for i, img_file in enumerate(images_list):
+#     data_path = root_data_path + str(label)
+#     os.makedirs(data_path, exist_ok=True)
+#     img_path = image_path + "ILSVRC2012_val_" + str(i+1).zfill(8) + ".JPEG"
+    shutil.move(img_file, root_data_path)
+#     if((i+1)%1000==0):
+#         print("processd:{}".format(i))
 
 def move_valimg(val_dir='./val', devkit_dir='./ILSVRC2012_devkit_t12'):
     """
@@ -58,16 +70,9 @@ def move_valimg(val_dir='./val', devkit_dir='./ILSVRC2012_devkit_t12'):
             os.mkdir(output_dir)
         shutil.move(os.path.join(root, filename), os.path.join(output_dir, filename))
 
-move_valimg("/mnt/data/ILSVRC2012/ILSVRC2012_val/val/","/mnt/data/ILSVRC2012/ILSVRC2012_devkit_t12/")
+# move_valimg("/mnt/data/ILSVRC2012/ILSVRC2012_val/val/","/mnt/data/ILSVRC2012/ILSVRC2012_devkit_t12/")
 
-# root_data_path = "./data/"
-# for i, label in enumerate(labels):
-#     data_path = root_data_path + str(label)
-#     os.makedirs(data_path, exist_ok=True)
-#     img_path = image_path + "ILSVRC2012_val_" + str(i+1).zfill(8) + ".JPEG"
-#     shutil.copy(img_path, data_path)
-#     if((i+1)%1000==0):
-#         print("processd:{}".format(i))
+
 
 
 

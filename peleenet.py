@@ -148,7 +148,8 @@ class PeleeNet(nn.Module):
 
     def forward(self, x):
         features = self.features(x)
-        out = F.avg_pool2d(features, kernel_size=(features.size(2), features.size(3))).view(features.size(0), -1)
+        # out = F.avg_pool2d(features, kernel_size=(features.size(2), features.size(3))).view(features.size(0), -1)
+        out = F.avg_pool2d(features, kernel_size=(7, 7)).view(features.size(0), -1)
         if self.drop_rate > 0:
             out = F.dropout(out, p=self.drop_rate, training=self.training)
         out = self.classifier(out)

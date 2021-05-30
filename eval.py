@@ -25,13 +25,13 @@ model_names = [ 'peleenet']
 engine_names = [ 'caffe', 'torch'] 
 
 parser = argparse.ArgumentParser(description='PeleeNet ImageNet Evaluation') 
-parser.add_argument('data', metavar='DIR', help='path to dataset') 
+parser.add_argument('--data', metavar='DIR', default='/mnt/data/ILSVRC2012/ILSVRC2012_val/', help='path to dataset') 
 parser.add_argument('--arch', '-a', metavar='ARCH', default='peleenet',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: peleenet)')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=1, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('-b', '--batch-size', default=100, type=int,
                     metavar='N', help='mini-batch size (default: 100)')
@@ -41,11 +41,13 @@ parser.add_argument('--print-freq', '-p', default=10, type=int,
 parser.add_argument('--deploy', '-m', metavar='ARCH', default='caffe/peleenet.prototxt',
                     help='model file ' )
 
-parser.add_argument('--engine', '-e', metavar='ENGINE', default='caffe', choices=engine_names,
+parser.add_argument('--engine', '-e', metavar='ENGINE', default='torch', choices=engine_names,
                     help='engine type ' +
                         ' | '.join(engine_names) +
                         ' (default: caffe)')
-parser.add_argument('--weights', type=str, metavar='PATH', default='caffe/peleenet.caffemodel',
+# parser.add_argument('--weights', type=str, metavar='PATH', default='caffe/peleenet.caffemodel',
+#                     help='path to init checkpoint (default: none)')
+parser.add_argument('--weights', type=str, metavar='PATH', default='weights/peleenet_acc7208.pth.tar',
                     help='path to init checkpoint (default: none)')
 
 parser.add_argument('--input-dim', default=224, type=int,
@@ -62,9 +64,10 @@ def main():
     # Data loading code
     # Val data loading
     valdir = os.path.join(args.data, 'val')
+    # valdir = args.data
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-
+        
     val_dataset = datasets.ImageFolder(
         valdir,
         transforms.Compose([
@@ -86,7 +89,9 @@ def main():
     model = create_model(num_classes, args.engine)
 
     if args.engine == 'torch':
-        validate_torch(val_loader, model)
+        validate_torch(val_loader, model, val_dataset.targets)
+    elif args.engine == 'tensorRT':
+        validate_tensorRT(val_loader, model)
     else:
         validate_caffe(val_loader, model)
 
@@ -101,20 +106,24 @@ def create_model(num_classes, engine='torch'):
                 print("=> unsupported model '{}'. creating PeleeNet by default.".format(args.arch))
                 model = PeleeNet(num_classes=num_classes)
 
-        # print(model)
+        print(model)
 
         model = torch.nn.DataParallel(model).cuda()
+
+        # model_dict = model.state_dict()
+        # state_dict = torch.load("weights/peleenet_acc7208.pth.tar", map_location='cpu')['state_dict']
+        # pretrained_dict = {k.strip('module.'): v for k, v in state_dict.items() 
+        #                 if k.strip('module.') in model_dict}
+        # model_dict.update(pretrained_dict)
+        # model.load_state_dict(model_dict)
 
         if args.weights:
             if os.path.isfile(args.weights):
                 print("=> loading checkpoint '{}'".format(args.weights))
                 checkpoint = torch.load(args.weights)
                 model.load_state_dict(checkpoint['state_dict'])
-
             else:
                 print("=> no checkpoint found at '{}'".format(args.weights))
-
-
 
         cudnn.benchmark = True
 
@@ -133,9 +142,10 @@ def create_model(num_classes, engine='torch'):
 
     return model
 
-def validate_torch(val_loader, model):
+def validate_tensorRT(val_loader, model,):
+    return 1
 
-
+def validate_torch(val_loader, model, labels):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
 
@@ -149,6 +159,7 @@ def validate_torch(val_loader, model):
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
+        # target = torch.tensor(labels[i*len(target):(i+1)*len(target)])
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input, volatile=True)
         target_var = torch.autograd.Variable(target, volatile=True)
@@ -159,7 +170,7 @@ def validate_torch(val_loader, model):
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], input.size(0))
+        # losses.update(loss.data[0], input.size(0))
         top1.update(prec1[0], input.size(0))
         top5.update(prec5[0], input.size(0))
 
@@ -170,10 +181,11 @@ def validate_torch(val_loader, model):
         if i % args.print_freq == 0:
             print('Test: [{0}/{1}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                #   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                   i, len(val_loader), batch_time=batch_time, loss=losses,
+                   i, len(val_loader), batch_time=batch_time, 
+                #    loss=losses,
                    top1=top1, top5=top5))
 
     print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
@@ -252,7 +264,7 @@ def accuracy(output, target, topk=(1,)):
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
