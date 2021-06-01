@@ -32,8 +32,9 @@ from eval import AverageMeter
 # /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n04243546/ILSVRC2012_val_00000857.JPEG 800
 
 filename = '/mnt/data/ILSVRC2012/ILSVRC2012_val/val/n02669723/ILSVRC2012_val_00000851.JPEG'
-max_batch_size = 1
-onnx_model_path = 'peleeNetBatch1.onnx'
+max_batch_size = 32
+onnx_model_path = 'peleeNetBatch32.onnx'
+onnx_batch = 32
 # onnx_model_path = 'resnet50.onnx'
 
 
@@ -45,10 +46,10 @@ batchSize       = max_batch_size
 inputSize       = (3,224,224)
 
 TRT_LOGGER = trt.Logger()  # This logger is required to build an engine
-
-class MyCalibrator(trt.IInt8EntropyCalibrator2):
+# IInt8EntropyCalibrator2/IInt8EntropyCalibrator/IInt8MinMaxCalibrator/IInt8LegacyCalibrator
+class MyCalibrator(trt.IInt8LegacyCalibrator):
     def __init__(self, calibCount, inputShape, dataPath, cacheFile):
-        trt.IInt8EntropyCalibrator2.__init__(self)                                              # 基类默认构造函数
+        trt.IInt8LegacyCalibrator.__init__(self)                                              # 基类默认构造函数
         self.calibCount     = calibCount
         self.shape          = inputShape
         self.calibDataSet   = self.loadData(dataPath)                                      # 需要自己实现一个读数据的函数
@@ -189,9 +190,9 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
             with open(onnx_file_path, 'rb') as model:
                 print('Beginning ONNX file parsing')
                 parser.parse(model.read())
-            network.mark_output(network.get_layer(network.num_layers-1).get_output(0))
-            last_layer = network.get_layer(network.num_layers - 1)
-            network.mark_output(last_layer.get_output(0))
+            # network.mark_output(network.get_layer(network.num_layers-1).get_output(0))
+            # last_layer = network.get_layer(network.num_layers - 1)
+            # network.mark_output(last_layer.get_output(0))
 
             print('Completed parsing of ONNX file')
             print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
@@ -286,7 +287,7 @@ def main():
     img_np_nchw = get_img_np_nchw(filename)
     img_np_nchw = img_np_nchw.astype(dtype=np.float32)
 
-    shape_of_output = (max_batch_size*1, 1000)
+    shape_of_output = (max_batch_size*onnx_batch, 1000)
     # shape_of_output = (max_batch_size, 1000)
 
     # # Do inference
@@ -336,7 +337,7 @@ def main():
         i = i+1
         if i % 10 == 0:
             print('Test: [{0}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Time {batch_time.val:.5f} ({batch_time.avg:.5f})\t'
                 #   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
