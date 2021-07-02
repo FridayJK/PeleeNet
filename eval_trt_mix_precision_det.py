@@ -1,3 +1,4 @@
+# coding: utf-8
 import os
 import time
 from PIL import Image
@@ -6,6 +7,7 @@ from glob import glob
 import cv2
 from torch._C import dtype
 import struct
+import pickle
 
 import torchvision
 import pycuda.autoinit
@@ -25,26 +27,21 @@ import torchvision.datasets as datasets
 
 from peleenet import PeleeNet
 from eval import AverageMeter
-# /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n01440764/ILSVRC2012_val_00000293.JPEG 0
-# /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n01531178/ILSVRC2012_val_00004243.JPEG 11
-# /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n02097474/ILSVRC2012_val_00000802.JPEG 200
-# /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n02669723/ILSVRC2012_val_00000851.JPEG 400
-# /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n03532672/ILSVRC2012_val_00000575.JPEG 600
-# /mnt/data/ILSVRC2012/ILSVRC2012_val/val/n04243546/ILSVRC2012_val_00000857.JPEG 800
 
-filename = '/mnt/data/ILSVRC2012/ILSVRC2012_val/val/n02669723/ILSVRC2012_val_00000851.JPEG'
-max_batch_size = 32
-onnx_model_path = 'peleeNetBatch32.onnx'
-onnx_batch = 32
+# filename = '/mnt/data/JiaoTongDet/2019-08-12-07-55-0114.jpg'
+filename = '/mnt/data/JiaoTongDet/video_19_0220.jpg'
+max_batch_size = 1
+onnx_model_path = 'peleeDetBatch1_v9_test.onnx'
+onnx_batch = 1
 # onnx_model_path = 'resnet50.onnx'
 
-
-calibDataPath   = "./data/cache/"
+calibDataPath   = "./data/cache_det/"
+calibImagePath  = "./data/val_det/"
 cacheFile       = calibDataPath + "calib.cache"
 iGpu            = 0
-calibCount      = 10
-batchSize       = max_batch_size
-inputSize       = (3,224,224)
+calibCount      = 30
+calBatchSize    = 32
+inputSize       = (3,544,960)
 
 TRT_LOGGER = trt.Logger()  # This logger is required to build an engine
 # IInt8EntropyCalibrator2/IInt8EntropyCalibrator/IInt8MinMaxCalibrator/IInt8LegacyCalibrator
@@ -92,10 +89,11 @@ class MyCalibrator(trt.IInt8EntropyCalibrator2):
         f.close()
 
     def loadData(dataPath,imgformate = ".JPEG"):
-        images_list = glob("./data/val/" + "*.JPEG")
-        data_np = np.zeros([len(images_list), 3, 224, 224])
+        with open(calibImagePath + "val_Det_list.txt","rt", encoding="utf-8") as f:
+            images_list = f.readlines()
+        data_np = np.zeros([len(images_list), 3, 544, 960])
         for i,filename in enumerate(images_list):
-            data_np[i,:] = get_img_np_nchw(filename)
+            data_np[i,:] = get_img_np_nchw_det((calibImagePath+filename).strip())
 
         return data_np
 
@@ -104,7 +102,7 @@ def getBatchData(filelists):
     out_batch = np.zeros([batch,inputSize[0],inputSize[1],inputSize[2]],dtype=np.float32)
     for i in range(len(filelists)//max_batch_size):
         for j, filename in enumerate(filelists[max_batch_size*i:max_batch_size*(i+1)]):
-            out_batch[j,:] = get_img_np_nchw(filename).astype(dtype=np.float32)
+            out_batch[j,:] = get_img_np_nchw_det(filename).astype(dtype=np.float32)
         yield np.ascontiguousarray(out_batch)
            
 def getBatchLabel(filelists):
@@ -115,15 +113,15 @@ def getBatchLabel(filelists):
             out_batch[j] = lab
         yield np.ascontiguousarray(out_batch)
 
-def get_img_np_nchw(filename):
+def get_img_np_nchw_det(filename):
     image = cv2.imread(filename)
     image_cv = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    off = 32
-    image_cv = cv2.resize(image_cv, (224+off, 224+off))
-    image_cv = image_cv[16:240,16:240,:]
-    miu = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-    img_np = np.array(image_cv, dtype=float) / 255.
+    # off = 32
+    image_cv = cv2.resize(image_cv, (960, 544))
+    # image_cv = image_cv[16:240,16:240,:]
+    miu = np.array([0.406, 0.456, 0.485])
+    std = np.array([0.225, 0.224, 0.229])
+    img_np = np.array(image_cv, dtype=np.float32) / 255.
     r = (img_np[:, :, 0] - miu[0]) / std[0]
     g = (img_np[:, :, 1] - miu[1]) / std[1]
     b = (img_np[:, :, 2] - miu[2]) / std[2]
@@ -163,24 +161,48 @@ def allocate_buffers(engine):
         else:
             outputs.append(HostDeviceMem(host_mem, device_mem))
     return inputs, outputs, bindings, stream
-
+# feat:['conv_282','conv_297','conv_312','conv_327']
+# exp:['exp_288','exp_303','exp_318','exp_333']
+det_feat_map=['Conv_282','Conv_297','Conv_312','Conv_327','Relu_256','Relu_9']
 def setLayerPrecision(network):
     print("Setting layers precision, layers number:{}".format(network.num_layers))
-    for i in range(network.num_layers):
+    # for i in range(network.num_layers):
+    for i in range(270):
     # for i in [0, 2, 4]:
         layer = network.get_layer(i)
-        layerName = layer.name
+        ltype_ = layer.name.split('_')[0]
+        if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Concat' or ltype_=='Add' or ltype_=='AveragePool'):
+            continue
+        if(layer.name.split('.')[0]=='base' or (layer.name in det_feat_map)):
+            continue
         if(layer.type!=trt.LayerType.CONSTANT and layer.type!=trt.LayerType.CONCATENATION and layer.type!=trt.LayerType.SHAPE \
             and layer.type!=trt.LayerType.GATHER and layer.type!=trt.LayerType.SHUFFLE):
             layer.precision = trt.int8
             # layer.precision = trt.float32
             # layer.precision = trt.float16
+            for j in range(layer.num_outputs):
+                tensorName = layer.get_output(j).name
+                if(layer.get_output(j).is_execution_tensor):
+                    layer.set_output_type(j,trt.int8)
+                # layer.set_output_type(j,trt.float32)
+                # layer.set_output_type(j,trt.float16)
+        else:
+            layer.precision = trt.float16
+            for j in range(layer.num_outputs):
+                tensorName = layer.get_output(j).name
+                if(layer.get_output(j).is_execution_tensor):
+                    layer.set_output_type(j,trt.float16)
+
+    for i in range(270, network.num_layers):
+        layer = network.get_layer(i)
+        if(layer.get_output(0).dtype == trt.int32): #int32 can't be convert to others type
+            continue
+        layer.precision = trt.float16
         for j in range(layer.num_outputs):
             tensorName = layer.get_output(j).name
             if(layer.get_output(j).is_execution_tensor):
-                layer.set_output_type(j,trt.int8)
-                # layer.set_output_type(j,trt.float32)
-                # layer.set_output_type(j,trt.float16)
+                layer.set_output_type(j,trt.float16)
+
 def setDynamicRange(network, valMap):
     print("setDynamicRange, layers number:{}".format(network.num_layers))
     #input
@@ -190,9 +212,14 @@ def setDynamicRange(network, valMap):
         network.get_input(i).dynamic_range = [-input_max,input_max]
         print("input:{}".format(network.get_input(i).dtype))
     #layers
-    for i in range(network.num_layers):
+    # for i in range(network.num_layers):
+    for i in range(270):
     # for i in [0, 2, 4]:
         layer = network.get_layer(i)
+        ltype_ = layer.name.split('_')[0]
+        if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Concat' or ltype_=='Add' or ltype_=='AveragePool' \
+            or layer.name.split('.')[0]=='base' or layer.name in det_feat_map):
+            continue
         for j in range(layer.num_outputs):
             tname = layer.get_output(j).name
             if(tname in valMap.keys() and layer.get_output(j).is_execution_tensor):
@@ -210,11 +237,8 @@ def readPerTensorDynamicRangeValues(mPerTensorDynamicRangeMap, filePath):
             mPerTensorDynamicRangeMap[key] = struct.unpack('>f', bytes.fromhex(val))[0]*127
             # mPerTensorDynamicRangeMap[key] = struct.unpack('>f', bytes.fromhex(val))[0]
 
-
-
-
 def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", \
-               fp16_mode=False, int8_mode=False, save_engine=False):
+               fp16_mode=False, int8_mode=False, save_engine=True):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
 
     def build_engine(max_batch_size, save_engine):
@@ -223,14 +247,11 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
         with trt.Builder(TRT_LOGGER) as builder, \
                 builder.create_network(explicit_batch) as network, \
                 trt.OnnxParser(network, TRT_LOGGER) as parser:
-            #mix precision
             builder.max_workspace_size = 1 << 30  # Your workspace size
             builder.max_batch_size = max_batch_size
-            # pdb.set_trace()
-            # builder.fp16_mode = fp16_mode  
+            builder.fp16_mode = fp16_mode  
             builder.int8_mode = int8_mode  
-            # builder.int8_calibrator = calib
-            builder.int8_calibrator = None
+            builder.int8_calibrator = calib
             # Parse model file
             if not os.path.exists(onnx_file_path):
                 quit('ONNX file {} not found'.format(onnx_file_path))
@@ -240,29 +261,24 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
                 print('Beginning ONNX file parsing')
                 parser.parse(model.read())
             # network.mark_output(network.get_layer(network.num_layers-1).get_output(0))
-            # last_layer = network.get_layer(network.num_layers - 1)
-            # network.mark_output(last_layer.get_output(0))
 
             mPerTensorDynamicRangeMap = dict()
-            cacheFilePath = "./data/cache/calib.cache"
+            cacheFilePath = "./data/cache_det/calib.cache"
             readPerTensorDynamicRangeValues(mPerTensorDynamicRangeMap, cacheFilePath)
 
             count =0
             matched = 0
             for i in range (network.num_layers):
                 layer = network.get_layer(i)
+                print('layer:{} name:{}'.format(i, layer.name))
                 for j in range(layer.num_outputs):
                     count = count+1
-                    print(layer.get_output(j).name, layer.name, layer.get_output(j).is_execution_tensor)
-                    if(layer.get_output(j).name in mPerTensorDynamicRangeMap.keys() and layer.get_output(j).is_execution_tensor):
-                        matched = matched+1
-                    elif(layer.get_output(j).name in mPerTensorDynamicRangeMap.keys() or layer.get_output(j).is_execution_tensor):
-                        print(layer.get_output(j).name, layer.name, layer.get_output(j).is_execution_tensor)
+                    print('output:{}, dtype:{}'.format(layer.get_output(j).name, layer.get_output(j).dtype, layer.get_output(j).is_execution_tensor))
+                    
             print("count:{} matched:{}".format(count, matched))
 
-            # setLayerPrecision(network)                        
+            # setLayerPrecision(network)            
             # setDynamicRange(network, mPerTensorDynamicRangeMap)
-            # config.set_flag(trt.BuilderFlag.STRICT_TYPES)
 
             print('Completed parsing of ONNX file')
             print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
@@ -295,9 +311,132 @@ def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
     # Return only the host outputs.
     return [out.host for out in outputs]
 
-def postprocess_the_outputs(h_outputs, shape_of_output):
-    h_outputs = h_outputs.reshape(*shape_of_output)
-    return h_outputs
+def xywh2xyxy(x):
+    y = x.new(x.shape)
+    y[..., 0] = x[..., 0] - x[..., 2] / 2
+    y[..., 1] = x[..., 1] - x[..., 3] / 2
+    y[..., 2] = x[..., 0] + x[..., 2] / 2
+    y[..., 3] = x[..., 1] + x[..., 3] / 2
+    return y
+
+def bbox_iou(box1, box2, x1y1x2y2=True):
+    """
+    Returns the IoU of two bounding boxes
+    """
+    if not x1y1x2y2:
+        # Transform from center and width to exact coordinates
+        b1_x1, b1_x2 = box1[:, 0] - box1[:, 2] / 2, box1[:, 0] + box1[:, 2] / 2
+        b1_y1, b1_y2 = box1[:, 1] - box1[:, 3] / 2, box1[:, 1] + box1[:, 3] / 2
+        b2_x1, b2_x2 = box2[:, 0] - box2[:, 2] / 2, box2[:, 0] + box2[:, 2] / 2
+        b2_y1, b2_y2 = box2[:, 1] - box2[:, 3] / 2, box2[:, 1] + box2[:, 3] / 2
+    else:
+        # Get the coordinates of bounding boxes
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
+    # get the corrdinates of the intersection rectangle
+    inter_rect_x1 = torch.max(b1_x1, b2_x1)
+    inter_rect_y1 = torch.max(b1_y1, b2_y1)
+    inter_rect_x2 = torch.min(b1_x2, b2_x2)
+    inter_rect_y2 = torch.min(b1_y2, b2_y2)
+    # Intersection area
+    inter_area = torch.clamp(inter_rect_x2 - inter_rect_x1 + 1, min=0) * torch.clamp(inter_rect_y2 - inter_rect_y1 + 1,
+                                                                                     min=0)
+    # Union Area
+    b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
+    b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
+
+    iou = inter_area / (b1_area + b2_area - inter_area + 1e-16)
+
+    return iou
+
+def non_max_suppression(prediction, xyxy=False, conf_thres=0.5, nms_thres=0.4, thresh_type='score'):
+    """
+    Removes detections with lower object confidence score than 'conf_thres' and performs
+    Non-Maximum Suppression to further filter detections.
+    
+    Args:
+        prediction: tensor with shape[batch,image_num,N],N=bbox+conf(centerness)+cls_num
+        xyxy: bbox type
+        conf_thres: blackground thresh(centerness_thresh)
+        nms_thres: nms thresh
+        thresh_type: "conf" or 'score'
+
+    Returns detections with shape:
+        (x1, y1, x2, y2, object_conf, class_score, class_pred)
+    """
+
+    # From (center x, center y, width, height) to (x1, y1, x2, y2)
+    if xyxy == False:
+        prediction[..., :4] = xywh2xyxy(prediction[..., :4])
+    output = [None for _ in range(len(prediction))]
+    for image_i, image_pred in enumerate(prediction):
+        # Filter out confidence scores below threshold
+        if thresh_type == 'conf':
+            image_pred = image_pred[image_pred[:, 4] >= conf_thres]
+            if image_pred.shape[0] <= 0:
+                continue
+            # Object confidence times class confidence
+            score = (image_pred[:, 4].unsqueeze(1) * image_pred[:, 5:]).max(1)[0]
+            # Sort by it
+            image_pred = image_pred[(-score).argsort()]
+            class_confs, class_preds = image_pred[:, 5:].max(1, keepdim=True)
+            detections = torch.cat((image_pred[:, :5], class_confs.float(), class_preds.float()), 1)
+        elif thresh_type == 'score':
+            # get the box cls is > 0.1
+            per_box_score = image_pred[:, 4:5] * image_pred[:, 5:]
+            if isinstance(conf_thres, list):
+                per_candidate_inds = per_box_score > torch.as_tensor(conf_thres).cuda()
+            elif isinstance(conf_thres, float):
+                per_candidate_inds = per_box_score > conf_thres
+            # multiply the classification scores with centerness scores
+            per_box_score = per_box_score[per_candidate_inds]
+            per_candidate_nonzeros = per_candidate_inds.nonzero()
+            per_box_loc = per_candidate_nonzeros[:, 0]
+            per_box_class = per_candidate_nonzeros[:, 1]
+            per_box_regression = image_pred[per_box_loc, :4]
+            image_pred = torch.cat(
+                [per_box_regression, per_box_score.unsqueeze(-1), per_box_class.unsqueeze(-1).float()], dim=-1)
+            # Sort by it
+            _, indices = per_box_score.sort(descending=True)
+            detections = image_pred[indices]
+        else:
+            raise ValueError
+        # If none are remaining => process next image
+        if not image_pred.size(0):
+            continue
+
+        # Perform non-maximum suppression
+        keep_boxes = []
+        while detections.size(0):
+            large_overlap = bbox_iou(detections[0, :4].unsqueeze(0), detections[:, :4]) > nms_thres
+            label_match = detections[0, -1] == detections[:, -1]
+            # Indices of boxes with lower confidence scores, large IOUs and matching labels
+            invalid = large_overlap & label_match
+            keep_boxes += [detections[0]]
+            detections = detections[~invalid]
+        if keep_boxes:
+            output[image_i] = torch.stack(keep_boxes)
+    return output
+
+def postprocess_the_outputs(outputs):
+    with open("fcos_anchors_locations.pkl","rb") as f:
+        anchors_locations = pickle.load(f)
+    anchors_locations = [torch.from_numpy(x) for x in anchors_locations]
+    outputs = torch.from_numpy(outputs)
+    idx1=0
+    for _, (locations, idx2) in enumerate(zip(anchors_locations, [8160,2040,510,135])):
+        idx2 = idx2 + idx1
+        pos_anchors_x = (locations[..., 0] + locations[..., 2])/2
+        pos_anchors_y = (locations[..., 1] + locations[..., 3])/2
+        outputs[:,idx1:idx2,0] = (outputs[:,idx1:idx2,0] + pos_anchors_x).clamp(min=0)
+        outputs[:,idx1:idx2,1] = (outputs[:,idx1:idx2,1] + pos_anchors_y).clamp(min=0)
+        idx1 = idx2
+    outputs2 = non_max_suppression(outputs, xyxy=False,
+                                        conf_thres=0.22,
+                                        nms_thres=0.5,
+                                        thresh_type='score')
+    outputs2 = [outp.numpy() for outp in outputs2]
+    return outputs2
 
 #data loader config
 test_data_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/"
@@ -320,29 +459,13 @@ def accuracy(output, target, topk=(1,)):
     return res
 
 def main():
-    valdir = os.path.join(test_data_path, 'val')
-    # valdir = args.data
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-        
-    val_dataset = datasets.ImageFolder(
-        valdir,
-        transforms.Compose([
-            transforms.Resize(input_dim+32),
-            transforms.CenterCrop(input_dim),
-            transforms.ToTensor(),
-            normalize,
-        ]))
-
-    num_classes = len(val_dataset.classes)
-    print('Total classes: ',num_classes)
-
     #---------------------------------------
-    calib = MyCalibrator(calibCount, (batchSize,) + inputSize, calibDataPath, cacheFile)
+    # calib = MyCalibrator(calibCount, (calBatchSize,) + inputSize, calibDataPath, cacheFile)
+    calib = None
 
     # These two modes are dependent on hardwares
-    fp16_mode = False
-    int8_mode = False
+    fp16_mode = True
+    int8_mode = True
     trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path)
     # Build an engine
     engine = get_engine(calib, max_batch_size, onnx_model_path, trt_engine_path, fp16_mode, int8_mode)
@@ -350,10 +473,10 @@ def main():
     # Allocate buffers for input and output
     inputs, outputs, bindings, stream = allocate_buffers(engine) # input, output: host # bindings
 
-    img_np_nchw = get_img_np_nchw(filename)
+    img_np_nchw = get_img_np_nchw_det(filename)
     img_np_nchw = img_np_nchw.astype(dtype=np.float32)
 
-    shape_of_output = (max_batch_size*onnx_batch, 1000)
+    shape_of_output = (max_batch_size, 10845, 9)
     # shape_of_output = (max_batch_size, 1000)
 
     # # Do inference
@@ -364,9 +487,43 @@ def main():
     t1 = time.time()
     trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream) # numpy data
     t2 = time.time()
-    feat = trt_outputs[0].reshape(*shape_of_output)
-    # feat = postprocess_the_outputs(trt_outputs[0], shape_of_output)
-    print(feat.argmax())
+    outputs = trt_outputs[0].reshape(*shape_of_output)
+    outputs2 = postprocess_the_outputs(outputs[0].reshape((1,10845,9)))
+
+    #show
+    COLOR = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255)]
+    for j, boxes in enumerate(outputs2):
+        cv_img = img_np_nchw[j].transpose(1, 2, 0)
+        mean = np.array([0.406, 0.456, 0.485])
+        std = np.array([0.225, 0.224, 0.229])
+        cv_img *= std
+        cv_img += mean
+        cv_img *= 255
+        cv_img = cv_img.astype(np.uint8)[:, :, [2, 1, 0]]
+        cv_img = cv2.cvtColor(np.asarray(cv_img), cv2.COLOR_RGB2BGR)
+        if boxes is None:
+            continue
+        for box in boxes:
+            # box = box.data.cpu().numpy()
+            xmin = int(box[0] * 1)
+            ymin = int(box[1] * 1)
+            xmax = int(box[2] * 1)
+            ymax = int(box[3] * 1)
+            cv2.rectangle(cv_img, (xmin, ymin), (xmax, ymax), COLOR[int(box[-1])], 1)
+            cv2.putText(cv_img, str(int(box[-1])), (xmin, ymin), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
+                        COLOR[int(box[-1])], 1)
+
+        # cv2.imshow("show", cv_img)
+        # cv2.imwrite("2019-08-12-07-55-0114_detRes.jpg",cv_img)
+        cv2.imwrite("video_19_0220.jpg",cv_img)
+        if cv2.waitKey() == ord("c"):
+            continue
+        elif cv2.waitKey() == ord("q"):
+            exit()
+
+
+
+
     print('TensorRT ok')
 
     top1 = AverageMeter()
@@ -377,42 +534,42 @@ def main():
 
     # use dataLoader gen input
     # for i, (input, target) in enumerate(val_loader):
-    imglists = [filename[0] for filename in val_dataset.imgs]
-    imglabels = [filename[1] for filename in val_dataset.imgs]
-    batch_data_gen = getBatchData(imglists)
-    batch_lab_gen = getBatchLabel(imglabels)
-    i=0
-    for batch_data in batch_data_gen:
-        batch_lab = next(batch_lab_gen)
-        inputs[0].host = batch_data.reshape(-1)
-        end = time.time()
-        trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream,batch_size=batchSize)
-        feat = postprocess_the_outputs(trt_outputs[0], shape_of_output)
+    # imglists = [filename[0] for filename in val_dataset.imgs]
+    # imglabels = [filename[1] for filename in val_dataset.imgs]
+    # batch_data_gen = getBatchData(imglists)
+    # batch_lab_gen = getBatchLabel(imglabels)
+    # i=0
+    # for batch_data in batch_data_gen:
+    #     batch_lab = next(batch_lab_gen)
+    #     inputs[0].host = batch_data.reshape(-1)
+    #     end = time.time()
+    #     trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream,batch_size=batchSize)
+    #     feat = postprocess_the_outputs(trt_outputs[0])
 
-        tensor_output = torch.from_numpy(feat[0:batchSize,:])
-        # np.savetxt('b32_res.txt',feat[0:32,:])
-        target = torch.from_numpy(batch_lab)
+    #     tensor_output = torch.from_numpy(feat[0:batchSize,:])
+    #     # np.savetxt('b32_res.txt',feat[0:32,:])
+    #     target = torch.from_numpy(batch_lab)
 
-        prec1, prec5 = accuracy(tensor_output.data, target, topk=(1, 5))
-        top1.update(prec1[0], (len(imglists)//max_batch_size)*max_batch_size)
-        top5.update(prec5[0], (len(imglists)//max_batch_size)*max_batch_size)
-        batch_time.update(time.time() - end)
-        end = time.time()
+    #     prec1, prec5 = accuracy(tensor_output.data, target, topk=(1, 5))
+    #     top1.update(prec1[0], (len(imglists)//max_batch_size)*max_batch_size)
+    #     top5.update(prec5[0], (len(imglists)//max_batch_size)*max_batch_size)
+    #     batch_time.update(time.time() - end)
+    #     end = time.time()
 
 
-        i = i+1
-        if i % 10 == 0:
-            print('Test: [{0}]\t'
-                  'Time {batch_time.val:.5f} ({batch_time.avg:.5f})\t'
-                #   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                   i, batch_time=batch_time, 
-                #    loss=losses,
-                   top1=top1, top5=top5))
+    #     i = i+1
+    #     if i % 10 == 0:
+    #         print('Test: [{0}]\t'
+    #               'Time {batch_time.val:.5f} ({batch_time.avg:.5f})\t'
+    #             #   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+    #               'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+    #               'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+    #                i, batch_time=batch_time, 
+    #             #    loss=losses,
+    #                top1=top1, top5=top5))
     
-    print("Inference time with the TensorRT engine: {}".format(t2-t1))
-    print('All completed!')
+    # print("Inference time with the TensorRT engine: {}".format(t2-t1))
+    # print('All completed!')
 
 
 if __name__ == '__main__':
