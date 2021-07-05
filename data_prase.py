@@ -17,21 +17,25 @@ val_id(start from 1) -> ILSVRC_ID(start from 1) -> WIND
 """
 #---------------------------------------
 
-image_path = "./data/ILSVRC2012_val/"
+# image_path = "./data/ILSVRC2012_val/"
+# image_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/val/*/"
+image_path = "/mnt/data/JiaoTongDet/"
+
 # devkit_dir = "/mnt/data/ILSVRC2012/ILSVRC2012_devkit_t12/"
 # synset = io.loadmat(os.path.join(devkit_dir, 'data', 'meta.mat'))
 # labels = np.loadtxt(os.path.join(devkit_dir, 'data', 'ILSVRC2012_validation_ground_truth.txt'),dtype="int")
 # labels = np.loadtxt(devkit_dir + "ILSVRC2012_validation_ground_truth.txt",dtype="int")
-images_list = glob(image_path + "*.JPEG", recursive=True)
+images_list = glob(image_path + "*.jpg", recursive=True)
 
-root_data_path = "./data/val/"
+root_data_path = "./data/val_det/"
 os.makedirs(root_data_path, exist_ok=True)
 images_list = random.sample(images_list, 1000)
 for i, img_file in enumerate(images_list):
 #     data_path = root_data_path + str(label)
 #     os.makedirs(data_path, exist_ok=True)
 #     img_path = image_path + "ILSVRC2012_val_" + str(i+1).zfill(8) + ".JPEG"
-    shutil.move(img_file, root_data_path)
+    # shutil.move(img_file, root_data_path)
+    shutil.copy(img_file, root_data_path)
 #     if((i+1)%1000==0):
 #         print("processd:{}".format(i))
 

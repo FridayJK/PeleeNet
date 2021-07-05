@@ -9,6 +9,7 @@ from torch._C import ThroughputBenchmark, dtype
 import struct
 import pickle
 import random
+import  json
 
 import torchvision
 import pycuda.autoinit
@@ -30,8 +31,7 @@ from peleenet import PeleeNet
 from eval import AverageMeter
 
 # filename = '/mnt/data/JiaoTongDet/2019-08-12-07-55-0114.jpg'
-# filename = '/mnt/data/JiaoTongDet/video_19_0220.jpg'
-filename = '/mnt/data/JiaoTongDet/卡口1_20200411_140817_00269.jpg'
+filename = '/mnt/data/JiaoTongDet/video_19_0220.jpg'
 max_batch_size = 16
 onnx_model_path = 'peleeDetBatch16_v9_test.onnx'
 onnx_batch = 16
@@ -426,6 +426,10 @@ def non_max_suppression(prediction, xyxy=False, conf_thres=0.5, nms_thres=0.4, t
             output[image_i] = torch.stack(keep_boxes)
     return output
 
+def write_json():
+
+    return
+
 def postprocess_the_outputs(outputs):
     with open("fcos_anchors_locations.pkl","rb") as f:
         anchors_locations = pickle.load(f)
@@ -443,11 +447,28 @@ def postprocess_the_outputs(outputs):
                                         conf_thres=0.22,
                                         nms_thres=0.5,
                                         thresh_type='score')
+    if(outputs2[0]==None):
+        return None
     outputs2 = [outp.numpy() for outp in outputs2]
     return outputs2
 
 #data loader config
 test_data_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/"
+
+def accuracy(output, target, topk=(1,)):
+    """Computes the precision@k for the specified values of k"""
+    maxk = max(topk)
+    batch_size = target.size(0)
+
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+    res = []
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
 
 def main():
     #---------------------------------------
@@ -461,68 +482,79 @@ def main():
     int8_mode = False
     model_type = "f32"
     trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path,model_type)
-    # trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path)
     # Build an engine
     engine = get_engine(calib, max_batch_size, onnx_model_path, trt_engine_path, fp16_mode, int8_mode)
     context = engine.create_execution_context()
     # Allocate buffers for input and output
     inputs, outputs, bindings, stream = allocate_buffers(engine) # input, output: host # bindings
 
-    img_np_nchw = get_img_np_nchw_det(filename)
-    img_np_nchw = img_np_nchw.astype(dtype=np.float32)
-
     shape_of_output = (max_batch_size, 10845, 9)
-    # shape_of_output = (max_batch_size, 1000)
 
-    # # Do inference
-    # # Load data to the buffer
-    inputs[0].host = img_np_nchw.reshape(-1)
+    with open("./test_list_JiaoTong.txt", encoding="utf-8") as f:
+        img_list = f.readlines()
 
-    # inputs[1].host = ... for multiple input
-    times = 1000
-    t1 = time.time()
-    for i in range(times):
+    infer_time = 0
+    detect_miss = 0
+    img_root_path = "/mnt/data/JiaoTongDet2/"
+    labels = {0: "person", 1: "non-motor", 2: "car", 3: "tricycle", 4: "motorcycle"}
+    json_writer = open("det_res_"+model_type+"_batch"+str(max_batch_size)+".json", "w")
+    for i, filename in enumerate(img_list):
+        # if(i>=1000):
+        #     continue
+        filename = img_root_path + filename.strip()
+        img_np_nchw = get_img_np_nchw_det(filename)
+        img_np_nchw = img_np_nchw.astype(dtype=np.float32)
+        # # Load data to the buffer
+        inputs[0].host = img_np_nchw.reshape(-1)
+        
+        t1 = time.time()
         trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream) # numpy data
-    t2 = time.time()
-    print("average time:{}".format((t2-t1)/times))
-    outputs = trt_outputs[0].reshape(*shape_of_output)
-    outputs2 = postprocess_the_outputs(outputs[0].reshape((1,10845,9)))
+        t2 = time.time()
+        infer_time = infer_time + t2-t1
+        outputs_res = trt_outputs[0].reshape(*shape_of_output)
+        # print(i,filename)
+        outputs2 = postprocess_the_outputs(outputs_res[0].reshape((1,10845,9)))
 
-    #show
-    COLOR = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255)]
-    for j, boxes in enumerate(outputs2):
-        cv_img = img_np_nchw[j].transpose(1, 2, 0)
-        mean = np.array([0.406, 0.456, 0.485])
-        std = np.array([0.225, 0.224, 0.229])
-        cv_img *= std
-        cv_img += mean
-        cv_img *= 255
-        cv_img = cv_img.astype(np.uint8)[:, :, [2, 1, 0]]
-        cv_img = cv2.cvtColor(np.asarray(cv_img), cv2.COLOR_RGB2BGR)
-        if boxes is None:
-            continue
-        for box in boxes:
-            # box = box.data.cpu().numpy()
-            xmin = int(box[0] * 1)
-            ymin = int(box[1] * 1)
-            xmax = int(box[2] * 1)
-            ymax = int(box[3] * 1)
-            cv2.rectangle(cv_img, (xmin, ymin), (xmax, ymax), COLOR[int(box[-1])], 1)
-            cv2.putText(cv_img, str(int(box[-1])), (xmin, ymin), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
-                        COLOR[int(box[-1])], 1)
+        dict_res = {}
+        dict_res["url"] = filename.strip()
+        dict_res["type"] = "image"
+        label_dict = {}
+        
+        if(outputs2 == None):
+            print("{}:no object detected".format(filename.encode("utf-8")))
+            detect_miss = detect_miss+1
+            label_dict["data"] = []
+        else:
+            for j, boxes in enumerate(outputs2):#for batch
+                label_dict["name"] = "general"
+                label_dict["type"] = "detection"
+                label_dict["version"] = "1"
+                data_list = []
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    data_dict = {}
+                    xmin = int(box[0] * 1)
+                    ymin = int(box[1] * 1)
+                    xmax = int(box[2] * 1)
+                    ymax = int(box[3] * 1)
+                    data_dict["bbox"] = [[xmin, ymin],[xmax, ymin],[xmax, ymax],[xmin, ymax]]
+                    data_dict["class"] = [labels[int(box[-1])]]
+                    data_dict["scores"] = [float(box[4])]
+                    data_list.append(data_dict)
+                label_dict["data"] = data_list
+        
+        dict_res["label"] = [label_dict]
+        json_str = json.dumps(dict_res)
+        json_writer.write(json_str+"\n")
 
-        # cv2.imshow("show", cv_img)
-        # cv2.imwrite("2019-08-12-07-55-0114_detRes.jpg",cv_img)
-        # cv2.imwrite("video_19_0220.jpg",cv_img)
-        cv2.imwrite("卡口1_20200411_140817_00269.jpg",cv_img)
-        if cv2.waitKey() == ord("c"):
-            continue
-        elif cv2.waitKey() == ord("q"):
-            exit()
+        if((i+1)%100==0):
+            print("processed:{}".format(i))
 
-
-
-
+    json_writer.close()
+    print("ave times:{}".format(infer_time/len(img_list)))
+    # print("ave times:{}".format(infer_time/1000))
+    print("{} images no obj detected".format(detect_miss))
     print('TensorRT ok')
 
     # top1 = AverageMeter()
