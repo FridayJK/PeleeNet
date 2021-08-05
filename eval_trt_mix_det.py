@@ -33,7 +33,9 @@ from eval import AverageMeter
 # filename = '/mnt/data/JiaoTongDet/2019-08-12-07-55-0114.jpg'
 filename = '/mnt/data/JiaoTongDet/video_19_0220.jpg'
 max_batch_size = 16
-onnx_model_path = 'peleeDetBatch16_v9_test.onnx'
+# onnx_model_path = 'peleeDetBatch1_v9_test.onnx'
+# onnx_model_path = 'peleeDetBatch1_v9_1.9.0_anchor.onnx'
+onnx_model_path = 'peleeDetBatch16_v9_1.9.0_atss.onnx'
 onnx_batch = 16
 # onnx_model_path = 'resnet50.onnx'
 
@@ -431,18 +433,18 @@ def write_json():
     return
 
 def postprocess_the_outputs(outputs):
-    with open("fcos_anchors_locations.pkl","rb") as f:
-        anchors_locations = pickle.load(f)
-    anchors_locations = [torch.from_numpy(x) for x in anchors_locations]
+    # with open("fcos_anchors_locations.pkl","rb") as f:
+    #     anchors_locations = pickle.load(f)
+    # anchors_locations = [torch.from_numpy(x) for x in anchors_locations]
     outputs = torch.from_numpy(outputs)
-    idx1=0
-    for _, (locations, idx2) in enumerate(zip(anchors_locations, [8160,2040,510,135])):
-        idx2 = idx2 + idx1
-        pos_anchors_x = (locations[..., 0] + locations[..., 2])/2
-        pos_anchors_y = (locations[..., 1] + locations[..., 3])/2
-        outputs[:,idx1:idx2,0] = (outputs[:,idx1:idx2,0] + pos_anchors_x).clamp(min=0)
-        outputs[:,idx1:idx2,1] = (outputs[:,idx1:idx2,1] + pos_anchors_y).clamp(min=0)
-        idx1 = idx2
+    # idx1=0
+    # for _, (locations, idx2) in enumerate(zip(anchors_locations, [8160,2040,510,135])):
+    #     idx2 = idx2 + idx1
+    #     pos_anchors_x = (locations[..., 0] + locations[..., 2])/2
+    #     pos_anchors_y = (locations[..., 1] + locations[..., 3])/2
+    #     outputs[:,idx1:idx2,0] = (outputs[:,idx1:idx2,0] + pos_anchors_x).clamp(min=0)
+    #     outputs[:,idx1:idx2,1] = (outputs[:,idx1:idx2,1] + pos_anchors_y).clamp(min=0)
+    #     idx1 = idx2
     outputs2 = non_max_suppression(outputs, xyxy=False,
                                         conf_thres=0.22,
                                         nms_thres=0.5,
@@ -455,32 +457,17 @@ def postprocess_the_outputs(outputs):
 #data loader config
 test_data_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/"
 
-def accuracy(output, target, topk=(1,)):
-    """Computes the precision@k for the specified values of k"""
-    maxk = max(topk)
-    batch_size = target.size(0)
-
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-    res = []
-    for k in topk:
-        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-        res.append(correct_k.mul_(100.0 / batch_size))
-    return res
-
 def main():
     #---------------------------------------
     # calib = MyCalibrator(calibCount, (calBatchSize,) + inputSize, calibDataPath, cacheFile)
     calib = None
 
     # These two modes are dependent on hardwares
+    fp16_mode = True
+    int8_mode = True
     # fp16_mode = True
-    # int8_mode = True
-    fp16_mode = False
-    int8_mode = False
-    model_type = "f32"
+    # int8_mode = False
+    model_type = "mix"
     trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path,model_type)
     # Build an engine
     engine = get_engine(calib, max_batch_size, onnx_model_path, trt_engine_path, fp16_mode, int8_mode)
@@ -490,14 +477,14 @@ def main():
 
     shape_of_output = (max_batch_size, 10845, 9)
 
-    with open("./test_list_JiaoTong.txt", encoding="utf-8") as f:
+    with open("./test_list_JiaoTong_v2.txt", encoding="utf-8") as f:
         img_list = f.readlines()
 
     infer_time = 0
     detect_miss = 0
     img_root_path = "/mnt/data/JiaoTongDet2/"
     labels = {0: "person", 1: "non-motor", 2: "car", 3: "tricycle", 4: "motorcycle"}
-    json_writer = open("det_res_"+model_type+"_batch"+str(max_batch_size)+".json", "w")
+    json_writer = open("det_res_"+model_type+"_batch"+str(max_batch_size)+ "_v3_newCab" +".json", "w")
     for i, filename in enumerate(img_list):
         # if(i>=1000):
         #     continue
@@ -534,10 +521,10 @@ def main():
                     continue
                 for box in boxes:
                     data_dict = {}
-                    xmin = int(box[0] * 1)
-                    ymin = int(box[1] * 1)
-                    xmax = int(box[2] * 1)
-                    ymax = int(box[3] * 1)
+                    xmin = int(box[0] * 1)*2
+                    ymin = int(box[1] * 1)*2
+                    xmax = int(box[2] * 1)*2
+                    ymax = int(box[3] * 1)*2
                     data_dict["bbox"] = [[xmin, ymin],[xmax, ymin],[xmax, ymax],[xmin, ymax]]
                     data_dict["class"] = [labels[int(box[-1])]]
                     data_dict["scores"] = [float(box[4])]

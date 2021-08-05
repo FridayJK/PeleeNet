@@ -27,11 +27,12 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets 
 
 filename = '/mnt/data/JiaoTongDet/2019-08-12-07-55-0114.jpg'
-max_batch_size = 32
+max_batch_size = 16
 # onnx_model_path = 'peleeDetBatch1_v9_1.9.0_atss_preprocess.onnx'
 # onnx_model_path = 'peleeDetBatch1_v9_1.9.0_atss_preprocess3.onnx'
-# onnx_model_path = 'peleeDet_atss_4.onnx'
-onnx_model_path = 'peleeDet_atss_testV11_v11.onnx'
+# onnx_model_path = 'peleeDet_atss_test2.onnx'
+# onnx_model_path = 'peleeDet_atss_test_static.onnx'
+onnx_model_path = 'peleeDet_atss_testV11_v10.onnx'
 onnx_batch = 16
 
 calibDataPath   = "./data/cache_det/"
@@ -153,7 +154,7 @@ def allocate_buffers(engine):
     bindings = []
     stream = cuda.Stream()
     for binding in engine:
-        size = trt.volume(engine.get_binding_shape(binding)[1:]) * engine.max_batch_size
+        size = trt.volume(engine.get_binding_shape(binding)) * engine.max_batch_size
         dtype = trt.nptype(engine.get_binding_dtype(binding))
         # Allocate host and device buffers
         host_mem = cuda.pagelocked_empty(size, dtype)
@@ -166,16 +167,19 @@ def allocate_buffers(engine):
         else:
             outputs.append(HostDeviceMem(host_mem, device_mem))
     return inputs, outputs, bindings, stream
-
+# feat:['conv_282','conv_297','conv_312','conv_327']
+# exp:['exp_288','exp_303','exp_318','exp_333']
+# det_feat_map=['Conv_282','Conv_297','Conv_312','Conv_327','Relu_256','Relu_9']
 det_feat_map=['Conv_282','Conv_297','Conv_312','Conv_327']
 def setLayerPrecision(network):
     print("Setting layers precision, layers number:{}".format(network.num_layers))
     # for i in range(network.num_layers):
-    for i in range(262):
+    for i in range(274):
+    # for i in [0, 2, 4]:
         layer = network.get_layer(i)
         ltype_ = layer.name.split('_')[0]
         # if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Concat' or ltype_=='Add' or ltype_=='AveragePool'):
-        if(ltype_=='Resize' or ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Add' or ltype_=='AveragePool'):
+        if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Add' or ltype_=='AveragePool'):
             continue
         if(layer.name.split('.')[0]=='base' or (layer.name in det_feat_map)):
             continue
@@ -197,7 +201,7 @@ def setLayerPrecision(network):
                 if(layer.get_output(j).is_execution_tensor):
                     layer.set_output_type(j,trt.float16)
 
-    for i in range(262, network.num_layers):
+    for i in range(274, network.num_layers):
         layer = network.get_layer(i)
         if(layer.get_output(0).dtype == trt.int32): #int32 can't be convert to others type
             continue
@@ -217,7 +221,7 @@ def setDynamicRange(network, valMap):
         print("input:{}".format(network.get_input(i).dtype))
     #layers
     # for i in range(network.num_layers):
-    for i in range(262):
+    for i in range(274):
         layer = network.get_layer(i)
         ltype_ = layer.name.split('_')[0]
         if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Add' or ltype_=='AveragePool' \
@@ -255,7 +259,6 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
             builder.fp16_mode = fp16_mode  
             builder.int8_mode = int8_mode  
             builder.int8_calibrator = calib
-
             # profile = builder.set_shape()
             # Parse model file
             if not os.path.exists(onnx_file_path):
@@ -265,7 +268,7 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
             with open(onnx_file_path, 'rb') as model:
                 print('Beginning ONNX file parsing')
                 parser.parse(model.read())
-            # network.mark_output(network.get_layer(network.num_layers-1).get_output(0))
+            network.mark_output(network.get_layer(network.num_layers-1).get_output(0))
 
             count =0
             matched = 0
@@ -274,7 +277,8 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
                 print('layer:{} name:{}'.format(i, layer.name))
                 for j in range(layer.num_outputs):
                     count = count+1
-                    print('output:{}, dtype:{}'.format(layer.get_output(j).name, layer.get_output(j).dtype, layer.get_output(j).is_execution_tensor))    
+                    print('output:{}, dtype:{}'.format(layer.get_output(j).name, layer.get_output(j).dtype, layer.get_output(j).is_execution_tensor))
+                    
             print("count:{} matched:{}".format(count, matched))
 
             if(int8_mode and calib == None):
@@ -284,26 +288,10 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
                 setLayerPrecision(network)            
                 setDynamicRange(network, mPerTensorDynamicRangeMap)
                 
-            # print('Completed parsing of ONNX file')
-            # print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
+            print('Completed parsing of ONNX file')
+            print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
 
-            config = builder.create_builder_config()
-            profile = builder.create_optimization_profile()
-            profile.set_shape(network.get_input(0).name, (1, 3, 544, 960), (16, 3, 544, 960), (32, 3, 544, 960))
-            config.add_optimization_profile(profile)
-            if(fp16_mode):
-                config.set_flag(trt.BuilderFlag.FP16)
-            if(int8_mode):
-                config.set_flag(trt.BuilderFlag.INT8)            
-            config.int8_calibrator = calib
-
-            # config.max_workspace_size=1<<30
-
-            # profile.set_shape('output', [1,]+ [10845, 9], [16,]+ [10845, 9], [16,]+ [10845, 9])
-            # config.add_optimization_profile(profile)
-
-            # engine = builder.build_cuda_engine(network)
-            engine = builder.build_engine(network,config = config)
+            engine = builder.build_cuda_engine(network)
             print("Completed creating Engine")
 
             if save_engine:
@@ -452,8 +440,8 @@ test_data_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/"
 
 def main():
     #---------------------------------------
-    # calib = MyCalibrator(calibCount, (calBatchSize,) + inputSize, calibDataPath, cacheFile)
-    calib = None
+    calib = MyCalibrator(calibCount, (calBatchSize,) + inputSize, calibDataPath, cacheFile)
+    # calib = None
 
     # These two modes are dependent on hardwares
     fp16_mode = True
@@ -461,30 +449,29 @@ def main():
     # fp16_mode = True
     # int8_mode = False
     model_type = "int8" #"f32" "mix" "int8" "f16"
+    # trt_engine_path = "./model_fp16_True_int8_True_maxbatch16_peleeDetBatch16_v9_1.9.0_atss.onnx_mix.trt"
     trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path,model_type)
-    # trt_engine_path = "./model_fp16_True_int8_True_maxbatch16_peleeDetBatch1_v9_1.9.0_atss_preprocess3.onnx_mix274.trt"
     # Build an engine
     engine = get_engine(calib, max_batch_size, onnx_model_path, trt_engine_path, fp16_mode, int8_mode)
     context = engine.create_execution_context()
-    context.set_binding_shape(0, (16, 3, 544, 960))
     # Allocate buffers for input and output
     inputs, outputs, bindings, stream = allocate_buffers(engine) # input, output: host # bindings
 
     img_np_nchw = get_img_np_nchw_det(filename)
     img_np_nchw = img_np_nchw.astype(dtype=np.float32)
 
-    shape_of_output = (16, 10845, 9)
+    shape_of_output = (max_batch_size, 10845, 9)
 
     # # Do inference
     # # Load data to the buffer
-    img_np_nchw = np.ascontiguousarray(np.repeat(img_np_nchw,16,axis=0))
+    img_np_nchw = np.ascontiguousarray(np.repeat(img_np_nchw,max_batch_size,axis=0))
     inputs[0].host = img_np_nchw.reshape(-1)
 
     # inputs[1].host = ... for multiple input
-    times = 10
+    times = 100
     t1 = time.time()
     for i in range(times):
-        trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream) # numpy data
+        trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream, batch_size = max_batch_size) # numpy data
     t2 = time.time()
     print("average time:{}".format((t2-t1)/times))
     outputs = trt_outputs[0].reshape(*shape_of_output)
@@ -494,11 +481,11 @@ def main():
     COLOR = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255)]
     for j, boxes in enumerate(outputs2):
         cv_img = img_np_nchw[j].transpose(1, 2, 0)
-        # mean = np.array([0.406, 0.456, 0.485])
-        # std = np.array([0.225, 0.224, 0.229])
-        # cv_img *= std
-        # cv_img += mean
-        # cv_img *= 255
+        mean = np.array([0.406, 0.456, 0.485])
+        std = np.array([0.225, 0.224, 0.229])
+        cv_img *= std
+        cv_img += mean
+        cv_img *= 255
         cv_img = cv_img.astype(np.uint8)[:, :, [2, 1, 0]]
         cv_img = cv2.cvtColor(np.asarray(cv_img), cv2.COLOR_RGB2BGR)
         if boxes is None:
