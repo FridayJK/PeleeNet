@@ -5,30 +5,14 @@ from PIL import Image
 import numpy as np
 from glob import glob
 import cv2
-from torch._C import ThroughputBenchmark, dtype
 import struct
 import pickle
 import random
 import  json
 
-import torchvision
 import pycuda.autoinit
 import pycuda.driver as cuda
 import tensorrt as trt
-
-import torch 
-import torch.nn as nn 
-import torch.nn.parallel 
-import torch.backends.cudnn as cudnn 
-import torch.distributed as dist 
-import torch.optim 
-import torch.utils.data 
-import torch.utils.data.distributed 
-import torchvision.transforms as transforms 
-import torchvision.datasets as datasets 
-
-from peleenet import PeleeNet
-from eval import AverageMeter
 
 # filename = '/mnt/data/JiaoTongDet/2019-08-12-07-55-0114.jpg'
 filename = '/mnt/data/JiaoTongDet/video_19_0220.jpg'
@@ -37,7 +21,8 @@ max_batch_size = 16
 # onnx_model_path = 'peleeDetBatch1_v9_1.9.0_anchor.onnx'
 onnx_model_path = 'peleeDetBatch16_v9_1.9.0_atss.onnx'
 onnx_batch = 16
-# onnx_model_path = 'resnet50.onnx'
+# img_size = [480, 864]
+img_size = [544, 960]
 
 calibDataPath   = "./data/cache_det/"
 calibImagePath  = "./data/val_det/"
@@ -45,7 +30,7 @@ cacheFile       = calibDataPath + "calib.cache"
 iGpu            = 0
 calibCount      = 3000
 calBatchSize    = 1
-inputSize       = (3,544,960)
+inputSize       = (3,img_size[0],img_size[1])
 
 TRT_LOGGER = trt.Logger()  # This logger is required to build an engine
 # IInt8EntropyCalibrator2/IInt8EntropyCalibrator/IInt8MinMaxCalibrator/IInt8LegacyCalibrator
@@ -96,7 +81,7 @@ class MyCalibrator(trt.IInt8EntropyCalibrator2):
         with open(calibImagePath + "callib_list_JiaoTong.txt","rt", encoding="utf-8") as f:
             images_list = f.readlines()
         images_list = random.sample(images_list,10)
-        data_np = np.zeros([len(images_list), 3, 544, 960],dtype=np.float32)
+        data_np = np.zeros([len(images_list), 3, img_size[0], img_size[1]],dtype=np.float32)
         for i,filename in enumerate(images_list):
             data_np[i,:] = get_img_np_nchw_det((calibImagePath+filename).strip())
             if((i+1)%100==0):
@@ -120,18 +105,37 @@ def getBatchLabel(filelists):
             out_batch[j] = lab
         yield np.ascontiguousarray(out_batch)
 
+# def get_img_np_nchw_det(filename):
+#     image = cv2.imread(filename)
+#     image_cv = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+#     # off = 32
+#     image_cv = cv2.resize(image_cv, (960, 544))
+#     # image_cv = image_cv[16:240,16:240,:]
+#     miu = np.array([0.406, 0.456, 0.485])
+#     std = np.array([0.225, 0.224, 0.229])
+#     img_np = np.array(image_cv, dtype=np.float32) / 255.
+#     r = (img_np[:, :, 0] - miu[0]) / std[0]
+#     g = (img_np[:, :, 1] - miu[1]) / std[1]
+#     b = (img_np[:, :, 2] - miu[2]) / std[2]
+#     img_np_t = np.array([r, g, b])
+#     img_np_nchw = np.expand_dims(img_np_t, axis=0)
+#     return img_np_nchw
+
 def get_img_np_nchw_det(filename):
     image = cv2.imread(filename)
     image_cv = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     # off = 32
-    image_cv = cv2.resize(image_cv, (960, 544))
-    # image_cv = image_cv[16:240,16:240,:]
+    image_cv = cv2.resize(image_cv, (img_size[1], img_size[0]))
     miu = np.array([0.406, 0.456, 0.485])
     std = np.array([0.225, 0.224, 0.229])
-    img_np = np.array(image_cv, dtype=np.float32) / 255.
-    r = (img_np[:, :, 0] - miu[0]) / std[0]
-    g = (img_np[:, :, 1] - miu[1]) / std[1]
-    b = (img_np[:, :, 2] - miu[2]) / std[2]
+    # img_np = np.array(image_cv, dtype=np.float32) / 255.
+    img_np = np.array(image_cv, dtype=np.float32) / 1.
+    # r = (img_np[:, :, 0] - miu[0]) / std[0]
+    # g = (img_np[:, :, 1] - miu[1]) / std[1]
+    # b = (img_np[:, :, 2] - miu[2]) / std[2]
+    r = img_np[:, :, 0]
+    g = img_np[:, :, 1]
+    b = img_np[:, :, 2]
     img_np_t = np.array([r, g, b])
     img_np_nchw = np.expand_dims(img_np_t, axis=0)
     return img_np_nchw
@@ -155,7 +159,7 @@ def allocate_buffers(engine):
     bindings = []
     stream = cuda.Stream()
     for binding in engine:
-        size = trt.volume(engine.get_binding_shape(binding)) * engine.max_batch_size
+        size = trt.volume(engine.get_binding_shape(binding)[1:]) * engine.max_batch_size
         dtype = trt.nptype(engine.get_binding_dtype(binding))
         # Allocate host and device buffers
         host_mem = cuda.pagelocked_empty(size, dtype)
@@ -322,7 +326,8 @@ def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
     return [out.host for out in outputs]
 
 def xywh2xyxy(x):
-    y = x.new(x.shape)
+    # y = x.new(x.shape)
+    y = np.zeros_like(x)
     y[..., 0] = x[..., 0] - x[..., 2] / 2
     y[..., 1] = x[..., 1] - x[..., 3] / 2
     y[..., 2] = x[..., 0] + x[..., 2] / 2
@@ -344,13 +349,12 @@ def bbox_iou(box1, box2, x1y1x2y2=True):
         b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
         b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
     # get the corrdinates of the intersection rectangle
-    inter_rect_x1 = torch.max(b1_x1, b2_x1)
-    inter_rect_y1 = torch.max(b1_y1, b2_y1)
-    inter_rect_x2 = torch.min(b1_x2, b2_x2)
-    inter_rect_y2 = torch.min(b1_y2, b2_y2)
+    inter_rect_x1 = np.maximum(b1_x1, b2_x1)
+    inter_rect_y1 = np.maximum(b1_y1, b2_y1)
+    inter_rect_x2 = np.minimum(b1_x2, b2_x2)
+    inter_rect_y2 = np.minimum(b1_y2, b2_y2)
     # Intersection area
-    inter_area = torch.clamp(inter_rect_x2 - inter_rect_x1 + 1, min=0) * torch.clamp(inter_rect_y2 - inter_rect_y1 + 1,
-                                                                                     min=0)
+    inter_area = np.clip(inter_rect_x2 - inter_rect_x1 + 1, 0, 10000) * np.clip(inter_rect_y2 - inter_rect_y1 + 1, 0, 10000)
     # Union Area
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
@@ -390,70 +394,53 @@ def non_max_suppression(prediction, xyxy=False, conf_thres=0.5, nms_thres=0.4, t
             # Sort by it
             image_pred = image_pred[(-score).argsort()]
             class_confs, class_preds = image_pred[:, 5:].max(1, keepdim=True)
-            detections = torch.cat((image_pred[:, :5], class_confs.float(), class_preds.float()), 1)
+            detections = np.concatenate((image_pred[:, :5], class_confs.float(), class_preds.float()), 1)
         elif thresh_type == 'score':
             # get the box cls is > 0.1
             per_box_score = image_pred[:, 4:5] * image_pred[:, 5:]
             if isinstance(conf_thres, list):
-                per_candidate_inds = per_box_score > torch.as_tensor(conf_thres).cuda()
+                per_candidate_inds = per_box_score > np.array(conf_thres)
             elif isinstance(conf_thres, float):
                 per_candidate_inds = per_box_score > conf_thres
             # multiply the classification scores with centerness scores
             per_box_score = per_box_score[per_candidate_inds]
             per_candidate_nonzeros = per_candidate_inds.nonzero()
+            per_candidate_nonzeros = np.vstack((per_candidate_nonzeros[0],per_candidate_nonzeros[1])).T
             per_box_loc = per_candidate_nonzeros[:, 0]
             per_box_class = per_candidate_nonzeros[:, 1]
             per_box_regression = image_pred[per_box_loc, :4]
-            image_pred = torch.cat(
-                [per_box_regression, per_box_score.unsqueeze(-1), per_box_class.unsqueeze(-1).float()], dim=-1)
+            image_pred = np.concatenate((per_box_regression, per_box_score.reshape(per_box_score.shape[0],1), per_box_class.reshape(per_box_class.shape[0],1)), axis=1)
+
             # Sort by it
-            _, indices = per_box_score.sort(descending=True)
+            indices = per_box_score.argsort()[::-1]
+            # _, indices = per_box_score.sort(descending=True)
             detections = image_pred[indices]
         else:
             raise ValueError
         # If none are remaining => process next image
-        if not image_pred.size(0):
+        if not image_pred.shape[0]:
             continue
 
         # Perform non-maximum suppression
         keep_boxes = []
-        while detections.size(0):
-            large_overlap = bbox_iou(detections[0, :4].unsqueeze(0), detections[:, :4]) > nms_thres
+        while detections.shape[0]:
+            large_overlap = bbox_iou(detections[0, :4].reshape(1,4), detections[:, :4]) > nms_thres
             label_match = detections[0, -1] == detections[:, -1]
             # Indices of boxes with lower confidence scores, large IOUs and matching labels
             invalid = large_overlap & label_match
             keep_boxes += [detections[0]]
             detections = detections[~invalid]
         if keep_boxes:
-            output[image_i] = torch.stack(keep_boxes)
+            output[image_i] = np.vstack(keep_boxes)
     return output
 
-def write_json():
-
-    return
-
 def postprocess_the_outputs(outputs):
-    # with open("fcos_anchors_locations.pkl","rb") as f:
-    #     anchors_locations = pickle.load(f)
-    # anchors_locations = [torch.from_numpy(x) for x in anchors_locations]
-    outputs = torch.from_numpy(outputs)
-    # idx1=0
-    # for _, (locations, idx2) in enumerate(zip(anchors_locations, [8160,2040,510,135])):
-    #     idx2 = idx2 + idx1
-    #     pos_anchors_x = (locations[..., 0] + locations[..., 2])/2
-    #     pos_anchors_y = (locations[..., 1] + locations[..., 3])/2
-    #     outputs[:,idx1:idx2,0] = (outputs[:,idx1:idx2,0] + pos_anchors_x).clamp(min=0)
-    #     outputs[:,idx1:idx2,1] = (outputs[:,idx1:idx2,1] + pos_anchors_y).clamp(min=0)
-    #     idx1 = idx2
     outputs2 = non_max_suppression(outputs, xyxy=False,
-                                        conf_thres=0.22,
+                                        conf_thres=[0.2754, 0.2283, 0.3089, 0.3933],
                                         nms_thres=0.5,
                                         thresh_type='score')
-    if(outputs2[0]==None):
-        return None
-    outputs2 = [outp.numpy() for outp in outputs2]
+    outputs2 = [outp for outp in outputs2]
     return outputs2
-
 #data loader config
 test_data_path = "/mnt/data/ILSVRC2012/ILSVRC2012_val/"
 
@@ -465,26 +452,30 @@ def main():
     # These two modes are dependent on hardwares
     fp16_mode = True
     int8_mode = True
-    # fp16_mode = True
-    # int8_mode = False
-    model_type = "mix"
+    model_type = "mix287_544x960_th"
     trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path,model_type)
+ 
+    trt_engine_path = 'model_mb16_peleeDet_atss_v11_20211118_544x960_dynamic.onnx_int8_1_8_16_v0.287.trt'
     # Build an engine
     engine = get_engine(calib, max_batch_size, onnx_model_path, trt_engine_path, fp16_mode, int8_mode)
     context = engine.create_execution_context()
+    exex_batch = 1
+    context.set_binding_shape(0, (exex_batch, 3, img_size[0], img_size[1]))
+
     # Allocate buffers for input and output
     inputs, outputs, bindings, stream = allocate_buffers(engine) # input, output: host # bindings
 
-    shape_of_output = (max_batch_size, 10845, 9)
+    out_shape = 10845 #10845 8617
+    shape_of_output = (max_batch_size, out_shape, 9)
 
-    with open("./test_list_JiaoTong_v2.txt", encoding="utf-8") as f:
+    with open("./test_list_JiaoTong_v3.txt", encoding="utf-8") as f:
         img_list = f.readlines()
 
     infer_time = 0
     detect_miss = 0
     img_root_path = "/mnt/data/JiaoTongDet2/"
     labels = {0: "person", 1: "non-motor", 2: "car", 3: "tricycle", 4: "motorcycle"}
-    json_writer = open("det_res_"+model_type+"_batch"+str(max_batch_size)+ "_v3_newCab" +".json", "w")
+    json_writer = open("det_res_"+model_type+"_batch"+str(max_batch_size)+ "_4th" +".json", "w")
     for i, filename in enumerate(img_list):
         # if(i>=1000):
         #     continue
@@ -500,7 +491,7 @@ def main():
         infer_time = infer_time + t2-t1
         outputs_res = trt_outputs[0].reshape(*shape_of_output)
         # print(i,filename)
-        outputs2 = postprocess_the_outputs(outputs_res[0].reshape((1,10845,9)))
+        outputs2 = postprocess_the_outputs(outputs_res[0].reshape((1,out_shape,9)))
 
         dict_res = {}
         dict_res["url"] = filename.strip()
@@ -521,10 +512,10 @@ def main():
                     continue
                 for box in boxes:
                     data_dict = {}
-                    xmin = int(box[0] * 1)*2
-                    ymin = int(box[1] * 1)*2
-                    xmax = int(box[2] * 1)*2
-                    ymax = int(box[3] * 1)*2
+                    xmin = int(box[0] * 1 * (1920/img_size[1]))
+                    ymin = int(box[1] * 1 * (1080/img_size[0]))
+                    xmax = int(box[2] * 1 * (1920/img_size[1]))
+                    ymax = int(box[3] * 1 * (1080/img_size[0]))
                     data_dict["bbox"] = [[xmin, ymin],[xmax, ymin],[xmax, ymax],[xmin, ymax]]
                     data_dict["class"] = [labels[int(box[-1])]]
                     data_dict["scores"] = [float(box[4])]
@@ -540,14 +531,8 @@ def main():
 
     json_writer.close()
     print("ave times:{}".format(infer_time/len(img_list)))
-    # print("ave times:{}".format(infer_time/1000))
     print("{} images no obj detected".format(detect_miss))
     print('TensorRT ok')
-
-    # top1 = AverageMeter()
-    # top5 = AverageMeter()
-    # batch_time = AverageMeter()
-
 
 if __name__ == '__main__':
     main()

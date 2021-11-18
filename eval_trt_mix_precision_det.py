@@ -5,34 +5,24 @@ from PIL import Image
 import numpy as np
 from glob import glob
 import cv2
-from torch._C import ThroughputBenchmark, dtype
 import struct
 import pickle
 import random
 
-import torchvision
 import pycuda.autoinit
 import pycuda.driver as cuda
 import tensorrt as trt
 
-import torch 
-import torch.nn as nn 
-import torch.nn.parallel 
-import torch.backends.cudnn as cudnn 
-import torch.distributed as dist 
-import torch.optim 
-import torch.utils.data 
-import torch.utils.data.distributed 
-import torchvision.transforms as transforms 
-import torchvision.datasets as datasets 
-
 filename = '/mnt/data/JiaoTongDet/2019-08-12-07-55-0114.jpg'
-max_batch_size = 32
-# onnx_model_path = 'peleeDetBatch1_v9_1.9.0_atss_preprocess.onnx'
-# onnx_model_path = 'peleeDetBatch1_v9_1.9.0_atss_preprocess3.onnx'
-# onnx_model_path = 'peleeDet_atss_4.onnx'
-onnx_model_path = 'peleeDet_atss_testV11_v11.onnx'
-onnx_batch = 16
+max_batch_size = 16
+profile_shape = (1,8,16)   #(min, opt, max)
+onnx_model_path = 'peleeDet_atss_v11_20211118_544x960_dynamic.onnx'   #960*544
+# onnx_model_path = 'peleeDet_atss_v11_20211118_544x960_nodynamic.onnx'   #960*544
+
+# img_size = [480, 864]
+# out_len = 8617
+img_size = [544, 960]
+out_len = 10845
 
 calibDataPath   = "./data/cache_det/"
 calibImagePath  = "./data/val_det/"
@@ -40,7 +30,7 @@ cacheFile       = calibDataPath + "calib.cache"
 iGpu            = 0
 calibCount      = 4000
 calBatchSize    = 1
-inputSize       = (3,544,960)
+inputSize       = (3,img_size[0],img_size[1])
 
 TRT_LOGGER = trt.Logger()  # This logger is required to build an engine
 # IInt8EntropyCalibrator2/IInt8EntropyCalibrator/IInt8MinMaxCalibrator/IInt8LegacyCalibrator
@@ -91,7 +81,7 @@ class MyCalibrator(trt.IInt8EntropyCalibrator2):
         with open(calibImagePath + "callib_list_JiaoTong.txt","rt", encoding="utf-8") as f:
             images_list = f.readlines()
         images_list = random.sample(images_list,10)
-        data_np = np.zeros([len(images_list), 3, 544, 960],dtype=np.float32)
+        data_np = np.zeros([len(images_list), 3, img_size[0], img_size[1]],dtype=np.float32)
         for i,filename in enumerate(images_list):
             data_np[i,:] = get_img_np_nchw_det((calibImagePath+filename).strip())
             if((i+1)%100==0):
@@ -119,7 +109,7 @@ def get_img_np_nchw_det(filename):
     image = cv2.imread(filename)
     image_cv = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     # off = 32
-    image_cv = cv2.resize(image_cv, (960, 544))
+    image_cv = cv2.resize(image_cv, (img_size[1], img_size[0]))
     miu = np.array([0.406, 0.456, 0.485])
     std = np.array([0.225, 0.224, 0.229])
     # img_np = np.array(image_cv, dtype=np.float32) / 255.
@@ -166,21 +156,21 @@ def allocate_buffers(engine):
         else:
             outputs.append(HostDeviceMem(host_mem, device_mem))
     return inputs, outputs, bindings, stream
-
+LAYERS_TH = 287 #262 #282 #285 #287:31.2ms |#288:30.3ms #289:30.4 #290:29.6ms
 det_feat_map=['Conv_282','Conv_297','Conv_312','Conv_327']
 def setLayerPrecision(network):
     print("Setting layers precision, layers number:{}".format(network.num_layers))
     # for i in range(network.num_layers):
-    for i in range(262):
+    for i in range(LAYERS_TH):
         layer = network.get_layer(i)
         ltype_ = layer.name.split('_')[0]
         # if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Concat' or ltype_=='Add' or ltype_=='AveragePool'):
-        if(ltype_=='Resize' or ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Add' or ltype_=='AveragePool'):
+        if(ltype_=='Resize' or ltype_=='Upsample' or ltype_=='Clip' or ltype_=='Exp'):
             continue
-        if(layer.name.split('.')[0]=='base' or (layer.name in det_feat_map)):
+        if(layer.name.split('.')[0]=='base' or (layer.name in det_feat_map) or layer.get_output(0).dtype == trt.int32):
             continue
-        if(layer.type!=trt.LayerType.CONSTANT and layer.type!=trt.LayerType.CONCATENATION and layer.type!=trt.LayerType.SHAPE \
-            and layer.type!=trt.LayerType.GATHER and layer.type!=trt.LayerType.SHUFFLE):
+        if(layer.type!=trt.LayerType.CONCATENATION and layer.type!=trt.LayerType.SHAPE \
+            and layer.type!=trt.LayerType.GATHER and layer.type!=trt.LayerType.SHUFFLE):  #layer.type!=trt.LayerType.CONSTANT and
             layer.precision = trt.int8
             # layer.precision = trt.float32
             # layer.precision = trt.float16
@@ -197,7 +187,7 @@ def setLayerPrecision(network):
                 if(layer.get_output(j).is_execution_tensor):
                     layer.set_output_type(j,trt.float16)
 
-    for i in range(262, network.num_layers):
+    for i in range(LAYERS_TH, network.num_layers):
         layer = network.get_layer(i)
         if(layer.get_output(0).dtype == trt.int32): #int32 can't be convert to others type
             continue
@@ -216,18 +206,21 @@ def setDynamicRange(network, valMap):
         network.get_input(i).dynamic_range = [-input_max,input_max]
         print("input:{}".format(network.get_input(i).dtype))
     #layers
-    # for i in range(network.num_layers):
-    for i in range(262):
+    # for i in range(network.num_layers): # ltype_=='AveragePool' # ltype_=='Add'
+    for i in range(LAYERS_TH):
         layer = network.get_layer(i)
         ltype_ = layer.name.split('_')[0]
-        if(ltype_=='Upsample' or ltype_=='Mul' or ltype_=='Clip' or ltype_=='Exp' or ltype_=='Add' or ltype_=='AveragePool' \
-            or layer.name.split('.')[0]=='base' or layer.name in det_feat_map):
+        if(ltype_=='Resize' or ltype_=='Upsample' or ltype_=='Clip' or ltype_=='Exp' \
+            or layer.name.split('.')[0]=='base' or layer.name in det_feat_map or layer.get_output(0).dtype == trt.int32):
             continue
         for j in range(layer.num_outputs):
             tname = layer.get_output(j).name
             if(tname in valMap.keys() and layer.get_output(j).is_execution_tensor):
+                print("out_blob:{}".format(tname))
                 layer_val = valMap[tname]
                 layer.get_output(j).dynamic_range = [-layer_val,layer_val]
+            else:
+                print("layer output:{} not set!@@@".format(tname))
 
 def readPerTensorDynamicRangeValues(mPerTensorDynamicRangeMap, filePath):
     print("parse DynamicRangeValues file")
@@ -256,8 +249,6 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
             builder.int8_mode = int8_mode  
             builder.int8_calibrator = calib
 
-            # profile = builder.set_shape()
-            # Parse model file
             if not os.path.exists(onnx_file_path):
                 quit('ONNX file {} not found'.format(onnx_file_path))
 
@@ -283,13 +274,10 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
                 readPerTensorDynamicRangeValues(mPerTensorDynamicRangeMap, cacheFilePath)
                 setLayerPrecision(network)            
                 setDynamicRange(network, mPerTensorDynamicRangeMap)
-                
-            # print('Completed parsing of ONNX file')
-            # print('Building an engine from file {}; this may take a while...'.format(onnx_file_path))
 
             config = builder.create_builder_config()
             profile = builder.create_optimization_profile()
-            profile.set_shape(network.get_input(0).name, (1, 3, 544, 960), (16, 3, 544, 960), (32, 3, 544, 960))
+            profile.set_shape(network.get_input(0).name, (profile_shape[0], 3, img_size[0], img_size[1]), (profile_shape[1], 3, img_size[0], img_size[1]), (profile_shape[2], 3, img_size[0], img_size[1]))
             config.add_optimization_profile(profile)
             if(fp16_mode):
                 config.set_flag(trt.BuilderFlag.FP16)
@@ -297,12 +285,9 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
                 config.set_flag(trt.BuilderFlag.INT8)            
             config.int8_calibrator = calib
 
-            # config.max_workspace_size=1<<30
-
-            # profile.set_shape('output', [1,]+ [10845, 9], [16,]+ [10845, 9], [16,]+ [10845, 9])
-            # config.add_optimization_profile(profile)
-
+            #stage1
             # engine = builder.build_cuda_engine(network)
+            #stage2
             engine = builder.build_engine(network,config = config)
             print("Completed creating Engine")
 
@@ -312,7 +297,6 @@ def get_engine(calib, max_batch_size=1, onnx_file_path="", engine_file_path="", 
             return engine
 
     if os.path.exists(engine_file_path):
-        # If a serialized engine exists, load it instead of building a new one.
         print("Reading engine from file {}".format(engine_file_path))
         with open(engine_file_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             return runtime.deserialize_cuda_engine(f.read())
@@ -332,7 +316,8 @@ def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
     return [out.host for out in outputs]
 
 def xywh2xyxy(x):
-    y = x.new(x.shape)
+    # y = x.new(x.shape)
+    y = np.zeros_like(x)
     y[..., 0] = x[..., 0] - x[..., 2] / 2
     y[..., 1] = x[..., 1] - x[..., 3] / 2
     y[..., 2] = x[..., 0] + x[..., 2] / 2
@@ -354,13 +339,12 @@ def bbox_iou(box1, box2, x1y1x2y2=True):
         b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
         b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
     # get the corrdinates of the intersection rectangle
-    inter_rect_x1 = torch.max(b1_x1, b2_x1)
-    inter_rect_y1 = torch.max(b1_y1, b2_y1)
-    inter_rect_x2 = torch.min(b1_x2, b2_x2)
-    inter_rect_y2 = torch.min(b1_y2, b2_y2)
+    inter_rect_x1 = np.maximum(b1_x1, b2_x1)
+    inter_rect_y1 = np.maximum(b1_y1, b2_y1)
+    inter_rect_x2 = np.minimum(b1_x2, b2_x2)
+    inter_rect_y2 = np.minimum(b1_y2, b2_y2)
     # Intersection area
-    inter_area = torch.clamp(inter_rect_x2 - inter_rect_x1 + 1, min=0) * torch.clamp(inter_rect_y2 - inter_rect_y1 + 1,
-                                                                                     min=0)
+    inter_area = np.clip(inter_rect_x2 - inter_rect_x1 + 1, 0, 10000) * np.clip(inter_rect_y2 - inter_rect_y1 + 1, 0, 10000)
     # Union Area
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
@@ -400,51 +384,52 @@ def non_max_suppression(prediction, xyxy=False, conf_thres=0.5, nms_thres=0.4, t
             # Sort by it
             image_pred = image_pred[(-score).argsort()]
             class_confs, class_preds = image_pred[:, 5:].max(1, keepdim=True)
-            detections = torch.cat((image_pred[:, :5], class_confs.float(), class_preds.float()), 1)
+            detections = np.concatenate((image_pred[:, :5], class_confs.float(), class_preds.float()), 1)
         elif thresh_type == 'score':
             # get the box cls is > 0.1
             per_box_score = image_pred[:, 4:5] * image_pred[:, 5:]
             if isinstance(conf_thres, list):
-                per_candidate_inds = per_box_score > torch.as_tensor(conf_thres).cuda()
+                per_candidate_inds = per_box_score > np.array(conf_thres)
             elif isinstance(conf_thres, float):
                 per_candidate_inds = per_box_score > conf_thres
             # multiply the classification scores with centerness scores
             per_box_score = per_box_score[per_candidate_inds]
             per_candidate_nonzeros = per_candidate_inds.nonzero()
+            per_candidate_nonzeros = np.vstack((per_candidate_nonzeros[0],per_candidate_nonzeros[1])).T
             per_box_loc = per_candidate_nonzeros[:, 0]
             per_box_class = per_candidate_nonzeros[:, 1]
             per_box_regression = image_pred[per_box_loc, :4]
-            image_pred = torch.cat(
-                [per_box_regression, per_box_score.unsqueeze(-1), per_box_class.unsqueeze(-1).float()], dim=-1)
+            image_pred = np.concatenate((per_box_regression, per_box_score.reshape(per_box_score.shape[0],1), per_box_class.reshape(per_box_class.shape[0],1)), axis=1)
+
             # Sort by it
-            _, indices = per_box_score.sort(descending=True)
+            indices = per_box_score.argsort()[::-1]
+            # _, indices = per_box_score.sort(descending=True)
             detections = image_pred[indices]
         else:
             raise ValueError
         # If none are remaining => process next image
-        if not image_pred.size(0):
+        if not image_pred.shape[0]:
             continue
 
         # Perform non-maximum suppression
         keep_boxes = []
-        while detections.size(0):
-            large_overlap = bbox_iou(detections[0, :4].unsqueeze(0), detections[:, :4]) > nms_thres
+        while detections.shape[0]:
+            large_overlap = bbox_iou(detections[0, :4].reshape(1,4), detections[:, :4]) > nms_thres
             label_match = detections[0, -1] == detections[:, -1]
             # Indices of boxes with lower confidence scores, large IOUs and matching labels
             invalid = large_overlap & label_match
             keep_boxes += [detections[0]]
             detections = detections[~invalid]
         if keep_boxes:
-            output[image_i] = torch.stack(keep_boxes)
+            output[image_i] = np.vstack(keep_boxes)
     return output
 
 def postprocess_the_outputs(outputs):
-    outputs = torch.from_numpy(outputs)
     outputs2 = non_max_suppression(outputs, xyxy=False,
-                                        conf_thres=0.22,
+                                        conf_thres=[0.2754, 0.2283, 0.3089, 0.3933],
                                         nms_thres=0.5,
                                         thresh_type='score')
-    outputs2 = [outp.numpy() for outp in outputs2]
+    outputs2 = [outp for outp in outputs2]
     return outputs2
 
 #data loader config
@@ -455,50 +440,45 @@ def main():
     # calib = MyCalibrator(calibCount, (calBatchSize,) + inputSize, calibDataPath, cacheFile)
     calib = None
 
-    # These two modes are dependent on hardwares
     fp16_mode = True
     int8_mode = True
-    # fp16_mode = True
-    # int8_mode = False
+
     model_type = "int8" #"f32" "mix" "int8" "f16"
-    trt_engine_path = './model_fp16_{}_int8_{}_maxbatch{}_{}_{}.trt'.format(fp16_mode, int8_mode, max_batch_size,onnx_model_path,model_type)
-    # trt_engine_path = "./model_fp16_True_int8_True_maxbatch16_peleeDetBatch1_v9_1.9.0_atss_preprocess3.onnx_mix274.trt"
+    version_ = "v0." + str(LAYERS_TH)
+    trt_engine_path = './model_mb{}_{}_{}_{}_{}_{}_{}.trt'.format(max_batch_size,onnx_model_path,model_type,profile_shape[0],profile_shape[1],profile_shape[2],version_)
+
     # Build an engine
     engine = get_engine(calib, max_batch_size, onnx_model_path, trt_engine_path, fp16_mode, int8_mode)
     context = engine.create_execution_context()
-    context.set_binding_shape(0, (16, 3, 544, 960))
+    exex_batch = 8
+    context.set_binding_shape(0, (exex_batch, 3, img_size[0], img_size[1]))
     # Allocate buffers for input and output
     inputs, outputs, bindings, stream = allocate_buffers(engine) # input, output: host # bindings
 
     img_np_nchw = get_img_np_nchw_det(filename)
     img_np_nchw = img_np_nchw.astype(dtype=np.float32)
 
-    shape_of_output = (16, 10845, 9)
+    shape_of_output = (max_batch_size, out_len, 9)
 
     # # Do inference
     # # Load data to the buffer
-    img_np_nchw = np.ascontiguousarray(np.repeat(img_np_nchw,16,axis=0))
+    img_np_nchw = np.ascontiguousarray(np.repeat(img_np_nchw,exex_batch,axis=0))
     inputs[0].host = img_np_nchw.reshape(-1)
 
     # inputs[1].host = ... for multiple input
-    times = 10
+    times = 1000
     t1 = time.time()
     for i in range(times):
         trt_outputs = do_inference(context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream) # numpy data
     t2 = time.time()
     print("average time:{}".format((t2-t1)/times))
     outputs = trt_outputs[0].reshape(*shape_of_output)
-    outputs2 = postprocess_the_outputs(outputs[0].reshape((1,10845,9)))
+    outputs2 = postprocess_the_outputs(outputs[0].reshape((1,out_len,9)))
 
     #show
     COLOR = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255)]
     for j, boxes in enumerate(outputs2):
         cv_img = img_np_nchw[j].transpose(1, 2, 0)
-        # mean = np.array([0.406, 0.456, 0.485])
-        # std = np.array([0.225, 0.224, 0.229])
-        # cv_img *= std
-        # cv_img += mean
-        # cv_img *= 255
         cv_img = cv_img.astype(np.uint8)[:, :, [2, 1, 0]]
         cv_img = cv2.cvtColor(np.asarray(cv_img), cv2.COLOR_RGB2BGR)
         if boxes is None:
@@ -513,7 +493,7 @@ def main():
                         COLOR[int(box[-1])], 1)
 
         # cv2.imshow("show", cv_img)
-        cv2.imwrite("2019-08-12-07-55-0114_res.jpg",cv_img)
+        cv2.imwrite("./output/2019-08-12-07-55-0114_res.jpg",cv_img)
         if cv2.waitKey() == ord("c"):
             continue
         elif cv2.waitKey() == ord("q"):
